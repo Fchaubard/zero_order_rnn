@@ -64,6 +64,267 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
+def log(msg):
+    """Simple logging helper"""
+    print(msg)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Binary LR Search Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def probe_loss_at_lr(model_params, loss_fn, lr, epsilon, num_perturbations,
+                     distribution, args, seed=0, n_steps=1,
+                     cache_weights_to_cpu=False):
+    """
+    Probe the loss after taking n_steps with a given learning rate.
+
+    Saves current weights, takes n_steps at the given lr/epsilon,
+    evaluates loss, then restores original weights.
+
+    Args:
+        model_params: List of model parameter tensors
+        loss_fn: Callable that returns the current loss
+        lr: Learning rate to probe (also used as epsilon)
+        epsilon: Epsilon value (typically same as lr for SPSA)
+        num_perturbations: Number of perturbations per step
+        distribution: Perturbation distribution ('rad', 'normal', etc.)
+        args: Full args namespace
+        seed: Random seed for reproducibility
+        n_steps: Number of optimization steps to take
+        cache_weights_to_cpu: If True, save weights to CPU to save GPU memory
+
+    Returns:
+        Final loss after n_steps at the given lr
+    """
+    device = model_params[0].device
+
+    # Save current weights
+    if cache_weights_to_cpu:
+        saved_weights = [p.data.clone().cpu() for p in model_params]
+    else:
+        saved_weights = [p.data.clone() for p in model_params]
+
+    # Temporarily modify args
+    original_lr = args.learning_rate
+    original_eps = args.epsilon
+    original_cache_gradients = args.cache_gradients if hasattr(args, 'cache_gradients') else True
+    args.learning_rate = lr
+    args.epsilon = lr  # For SPSA, epsilon typically equals lr
+    # Force cache_gradients=True during probing (the non-cached branch is deprecated)
+    args.cache_gradients = True
+
+    # Take n_steps
+    for step in range(n_steps):
+        # Set seed for reproducibility across probes
+        torch.manual_seed(seed + step)
+        random.seed(seed + step)
+
+        if args.solver == "1.5-SPSA":
+            SPSA1_5(
+                model_params=model_params,
+                loss_fn=loss_fn,
+                lr=lr,
+                epsilon=lr,
+                iterations=1,
+                num_perturbations=num_perturbations,
+                distribution=distribution,
+                antithetic=args.antithetic_sampling,
+                use_adaptive_step=False,
+                clip_grad_norm=args.grad_clip,
+                cache_gradients=True,  # Always use cached path (non-cached is deprecated)
+                args=args,
+            )
+        elif args.solver == "1SPSA":
+            cdrge_optimize(
+                model_params=model_params,
+                loss_fn=loss_fn,
+                lr=lr,
+                epsilon=lr,
+                iterations=1,
+                num_perturbations=num_perturbations,
+                distribution=distribution,
+                antithetic=args.antithetic_sampling,
+                use_adaptive_step=False,
+                clip_grad_norm=args.grad_clip,
+                cache_gradients=True,  # Always use cached path (non-cached is deprecated)
+                args=args,
+            )
+        else:
+            raise ValueError(f"Binary LR search not supported for solver: {args.solver}")
+
+    # Evaluate loss after steps
+    with torch.no_grad():
+        final_loss = loss_fn()
+        if hasattr(final_loss, 'item'):
+            final_loss = final_loss.item()
+
+    # Restore original weights
+    for p, saved in zip(model_params, saved_weights):
+        if cache_weights_to_cpu:
+            p.data.copy_(saved.to(device))
+        else:
+            p.data.copy_(saved)
+
+    # Restore original args
+    args.learning_rate = original_lr
+    args.epsilon = original_eps
+    args.cache_gradients = original_cache_gradients
+
+    return final_loss
+
+
+def binary_search_lr(model_params, loss_fn, lr_min, lr_max,
+                     num_perturbations, distribution, args,
+                     depth=3, seed=0, probe_steps=1,
+                     cache_weights_to_cpu=False):
+    """
+    Binary search for optimal lr in log space.
+
+    Depth 1: Test 3 points (min, mid, max)
+    Depth 2: Halve to better half, test midpoint
+    Depth 3: Halve again, test midpoint
+
+    Args:
+        model_params: List of model parameter tensors
+        loss_fn: Callable that returns current loss
+        lr_min: Minimum learning rate to search
+        lr_max: Maximum learning rate to search
+        num_perturbations: Number of perturbations per step
+        distribution: Perturbation distribution
+        args: Full args namespace
+        depth: Search depth (default 3)
+        seed: Random seed for probing
+        probe_steps: Number of steps to take when probing each LR
+        cache_weights_to_cpu: Save weights to CPU during probing
+
+    Returns:
+        best_lr: Best learning rate found
+    """
+    # Verify restoration works before expensive search
+    initial_loss = loss_fn()
+    if hasattr(initial_loss, 'item'):
+        initial_loss = initial_loss.item()
+
+    _ = probe_loss_at_lr(model_params, loss_fn, lr_min, lr_min,
+                         num_perturbations, distribution, args,
+                         seed=999, n_steps=1,
+                         cache_weights_to_cpu=cache_weights_to_cpu)
+
+    restored_loss = loss_fn()
+    if hasattr(restored_loss, 'item'):
+        restored_loss = restored_loss.item()
+
+    if abs(restored_loss - initial_loss) > 0.01:
+        log(f"  WARNING: Weight restoration drift: {initial_loss:.4f} -> {restored_loss:.4f}")
+
+    log_min = math.log10(lr_min)
+    log_max = math.log10(lr_max)
+
+    # Depth 1: Test 3 points
+    log_mid = (log_min + log_max) / 2
+    points = [log_min, log_mid, log_max]
+    results = []
+
+    steps_str = f" ({probe_steps} steps each)" if probe_steps > 1 else ""
+    log(f"  Binary search depth 1: testing {len(points)} points in [{lr_min:.0e}, {lr_max:.0e}]{steps_str}")
+
+    for log_lr in points:
+        lr = 10 ** log_lr
+        loss = probe_loss_at_lr(model_params, loss_fn, lr, lr,
+                                num_perturbations, distribution, args,
+                                seed=seed, n_steps=probe_steps,
+                                cache_weights_to_cpu=cache_weights_to_cpu)
+        results.append((log_lr, loss))
+        log(f"    lr={lr:.2e} -> loss={loss:.4f}")
+
+    # Find best and narrow search
+    best_idx = min(range(len(results)), key=lambda i: results[i][1])
+
+    for d in range(2, depth + 1):
+        # Narrow to region around best
+        if best_idx == 0:
+            log_max = results[1][0]
+        elif best_idx == len(results) - 1:
+            log_min = results[-2][0]
+        else:
+            log_min = results[best_idx - 1][0]
+            log_max = results[best_idx + 1][0]
+
+        # Test midpoint of new range
+        log_mid = (log_min + log_max) / 2
+        lr = 10 ** log_mid
+        loss = probe_loss_at_lr(model_params, loss_fn, lr, lr,
+                                num_perturbations, distribution, args,
+                                seed=seed, n_steps=probe_steps,
+                                cache_weights_to_cpu=cache_weights_to_cpu)
+        log(f"  Binary search depth {d}: lr={lr:.2e} -> loss={loss:.4f}")
+
+        # Update results
+        results.append((log_mid, loss))
+        results.sort(key=lambda x: x[0])
+        best_idx = min(range(len(results)), key=lambda i: results[i][1])
+
+    best_log_lr, best_loss = min(results, key=lambda x: x[1])
+    best_lr = 10 ** best_log_lr
+    log(f"  Binary search complete: best lr={best_lr:.2e} (loss={best_loss:.4f})")
+    return best_lr
+
+
+class EMAPlateauDetector:
+    """
+    Detects when training loss has plateaued using exponential moving average.
+
+    Triggers when the EMA hasn't improved by more than threshold for
+    patience iterations.
+    """
+    def __init__(self, alpha=0.1, patience=10, threshold=0.01):
+        """
+        Args:
+            alpha: EMA smoothing factor (higher = more weight on recent values)
+            patience: Number of iterations without improvement before triggering
+            threshold: Minimum relative improvement required
+        """
+        self.alpha = alpha
+        self.patience = patience
+        self.threshold = threshold
+        self.ema = None
+        self.best_ema = None
+        self.iters_without_improvement = 0
+
+    def update(self, loss):
+        """
+        Update EMA with new loss value.
+
+        Args:
+            loss: Current training loss
+
+        Returns:
+            True if plateau detected, False otherwise
+        """
+        if self.ema is None:
+            self.ema = loss
+            self.best_ema = loss
+            return False
+
+        # Update EMA
+        self.ema = self.alpha * loss + (1 - self.alpha) * self.ema
+
+        # Check for improvement
+        relative_improvement = (self.best_ema - self.ema) / (self.best_ema + 1e-8)
+
+        if relative_improvement > self.threshold:
+            self.best_ema = self.ema
+            self.iters_without_improvement = 0
+        else:
+            self.iters_without_improvement += 1
+
+        return self.iters_without_improvement >= self.patience
+
+    def reset(self):
+        """Reset the detector after LR search"""
+        self.iters_without_improvement = 0
+        # Keep EMA and best_ema to continue tracking
 
 
 def compute_task_loss(logits, ids_np, tok, task, verbose=False):
@@ -2798,7 +3059,50 @@ def train(args):
     if args.hidden_size<4096:
         args.cache_gradients = True # THIS WILL COST US VRAM, but speed us up at the end, if we have the space we should use it.
     else:
-        args.cache_gradients = False # THIS WILL SAVE VRAM, but slow us down a bit at the end. 
+        args.cache_gradients = False # THIS WILL SAVE VRAM, but slow us down a bit at the end.
+
+    # ───────── Binary LR Search Initialization ─────────
+    plateau_detector = None
+    if hasattr(args, 'binary_lr_search') and args.binary_lr_search and args.solver in ["1SPSA", "1.5-SPSA"]:
+        print("="*50)
+        print("BINARY LR SEARCH MODE ENABLED")
+        print("="*50)
+
+        # Create plateau detector
+        plateau_detector = EMAPlateauDetector(
+            alpha=args.plateau_ema_alpha if hasattr(args, 'plateau_ema_alpha') else 0.1,
+            patience=args.plateau_patience if hasattr(args, 'plateau_patience') else 10,
+            threshold=args.plateau_threshold if hasattr(args, 'plateau_threshold') else 0.01
+        )
+
+        # Define loss function for LR search (using init_batch for consistency)
+        def lr_search_loss_fn():
+            ids = torch.as_tensor(init_batch, device=device, dtype=torch.long)
+            xemb = model.embed(ids)
+            logits, _, _ = model(xemb, require_gradients=False)
+            return compute_task_loss(logits, init_batch, tok, args.task)
+
+        # Run initial binary LR search
+        print("Running initial binary LR search...")
+        best_lr = binary_search_lr(
+            model_params=model_params,
+            loss_fn=lr_search_loss_fn,
+            lr_min=args.lr_search_min if hasattr(args, 'lr_search_min') else 1e-5,
+            lr_max=args.lr_search_max if hasattr(args, 'lr_search_max') else 0.1,
+            num_perturbations=args.num_perturbations,
+            distribution=args.distribution,
+            args=args,
+            depth=args.lr_search_depth if hasattr(args, 'lr_search_depth') else 3,
+            seed=args.seed,
+            probe_steps=args.lr_search_probe_steps if hasattr(args, 'lr_search_probe_steps') else 1,
+            cache_weights_to_cpu=args.cache_weights_to_cpu if hasattr(args, 'cache_weights_to_cpu') else False
+        )
+
+        # Update LR and epsilon
+        args.learning_rate = best_lr
+        args.epsilon = best_lr
+        print(f"Initial LR search complete. Using lr={best_lr:.2e}")
+        print("="*50)
 
     total_iterations = 0
     for iteration in range(args.max_iterations):
@@ -2868,6 +3172,49 @@ def train(args):
                 # time.sleep(100000)
                 # return
                 break
+
+        # ───────── Plateau Detection and LR Re-search ─────────
+        if plateau_detector is not None:
+            current_loss = step_metrics['train_loss'][-1]
+            is_plateau = plateau_detector.update(current_loss)
+
+            if is_plateau:
+                print("="*50)
+                print(f"PLATEAU DETECTED at iteration {iteration+1} (EMA: {plateau_detector.ema:.4f})")
+                print("Running binary LR search...")
+
+                # Define loss function for LR search
+                def lr_search_loss_fn_plateau():
+                    ids = torch.as_tensor(train_batch, device=device, dtype=torch.long)
+                    xemb = model.embed(ids)
+                    logits, _, _ = model(xemb, require_gradients=False)
+                    return compute_task_loss(logits, train_batch, tok, args.task)
+
+                # Run binary LR search
+                best_lr = binary_search_lr(
+                    model_params=model_params,
+                    loss_fn=lr_search_loss_fn_plateau,
+                    lr_min=args.lr_search_min if hasattr(args, 'lr_search_min') else 1e-5,
+                    lr_max=args.lr_search_max if hasattr(args, 'lr_search_max') else 0.1,
+                    num_perturbations=args.num_perturbations,
+                    distribution=args.distribution,
+                    args=args,
+                    depth=args.lr_search_depth if hasattr(args, 'lr_search_depth') else 3,
+                    seed=args.seed + iteration,  # Different seed each time
+                    probe_steps=args.lr_search_probe_steps if hasattr(args, 'lr_search_probe_steps') else 1,
+                    cache_weights_to_cpu=args.cache_weights_to_cpu if hasattr(args, 'cache_weights_to_cpu') else False
+                )
+
+                # Update LR and epsilon
+                old_lr = args.learning_rate
+                args.learning_rate = best_lr
+                args.epsilon = best_lr
+                print(f"LR updated: {old_lr:.2e} -> {best_lr:.2e}")
+                print("="*50)
+
+                # Reset plateau detector
+                plateau_detector.reset()
+
         # Logging
         if (iteration + 1) % args.log_interval == 0 and not has_overfit_flag:
             with torch.no_grad():
@@ -3266,8 +3613,28 @@ def get_argument_parser():
     parser.add_argument("--sanger_qr_every", type=int, default=10000000)
     parser.add_argument("--warmup_iters", type=int, default=100)
     parser.add_argument("--alpha_eye_scalar", type=float, default=1.)
-    
-    
+
+    # Binary LR Search settings
+    parser.add_argument("--binary_lr_search", action="store_true", default=False,
+                        help="Enable adaptive LR search: find optimal LR at start and on plateau")
+    parser.add_argument("--lr_search_min", type=float, default=1e-5,
+                        help="Minimum LR to search (binary_lr_search)")
+    parser.add_argument("--lr_search_max", type=float, default=0.1,
+                        help="Maximum LR to search (binary_lr_search)")
+    parser.add_argument("--lr_search_depth", type=int, default=3,
+                        help="Depth of binary search (more depth = finer search)")
+    parser.add_argument("--lr_search_probe_steps", type=int, default=1,
+                        help="Number of steps to probe at each LR candidate")
+    parser.add_argument("--plateau_patience", type=int, default=10,
+                        help="Iterations without improvement before re-searching LR")
+    parser.add_argument("--plateau_threshold", type=float, default=0.01,
+                        help="Minimum relative improvement to consider progress")
+    parser.add_argument("--plateau_ema_alpha", type=float, default=0.1,
+                        help="EMA smoothing factor for plateau detection")
+    parser.add_argument("--cache_weights_to_cpu", action="store_true", default=False,
+                        help="Save weights to CPU during LR probing (saves GPU memory)")
+
+
     # Curriculum learning
     parser.add_argument("--curriculum", action="store_true")
     parser.add_argument("--curriculum_steps", type=int, default=5) 

@@ -37,7 +37,7 @@ capture_screen_logs() {
         # Flush stdout to ensure output is printed immediately
 
         echo "Pausing for 5 seconds before moving to the next session..." >&2
-        sleep 1
+        sleep 0
     done
 }
 

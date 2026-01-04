@@ -1,0 +1,228 @@
+#!/bin/bash
+
+##############################################################################
+# Run DNC or LSTM sweeps with Binary LR Search
+#
+# This script uses --binary_lr_search to automatically find optimal learning
+# rates instead of sweeping over a fixed grid of LRs. This typically results
+# in faster convergence with fewer experiments needed.
+##############################################################################
+
+# 1) Kill existing screen sessions
+echo "[INFO] Killing existing screen sessions named '*'..."
+screen -ls | grep '\.' | awk '{print $1}' | xargs -I{} screen -S {} -X quit 2>/dev/null
+
+echo "[INFO] Starting runs with Binary LR Search..."
+
+
+########## RUN PREFIX #############
+RUN_PREFIX="copy_binlr_"
+
+
+# Define hyperparameter arrays (adjust these values as needed):
+TASKS=("copy") # can use copy, reverse, sort, add, penn_treebank, etc..
+ARCHITECTURES=("DNC")
+
+MODEL_SCALES=(4 8 16 32 64) # Can choose anything here from 1 to 64: MODEL_SCALES=(1 2 4 8 16 32 64)
+hidden_size=128
+memory_size=128
+head_size=128
+num_heads=1
+input_dim=128
+
+INPUT_SAMPLE_LENGTHS=(100)
+MICRO_BATCH_SIZES=(1)
+MACRO_BATCH_SIZES=(1)
+
+# Binary LR Search settings - no need to sweep LRs manually!
+LR_SEARCH_MIN=0.0001
+LR_SEARCH_MAX=0.5
+LR_SEARCH_DEPTH=10
+PLATEAU_PATIENCE=30
+PLATEAU_THRESHOLD=0.005
+
+# Initial LR (will be overridden by binary search)
+LEARNING_RATE=0.01
+EPSILON=0.01
+
+MAX_NUMS=(120)
+WEIGHT_DECAYS=(0)
+GRAD_CLIPS=(0)
+SOLVERS=("1.5-SPSA" "1SPSA") # "BPTT"  "1.5-SPSA" "2SPSA"
+
+BETA1s=(0.)
+BETA2s=(0.)
+PROBE_PROCONDITIONINGS=(false)
+
+SANGER_RANKS=(1)
+alpha_eye_scalars=(1.0)
+beta_eigen_sangers=(0)
+
+# NUM_PERTURBATIONS=(8 96 512)
+NUM_PERTURBATIONS=(8)
+saturating_alphas=(0.1)
+
+OVERFITS=(true)
+
+# Other configurations:
+LOG_INTERVAL=100
+MAX_ITERS=5000
+
+ADAM=false
+WANDB=false
+WANDB_PROJ=""
+
+# Function to truncate a long session name (if needed)
+truncate_name() {
+  echo "$1" | cut -c1-65
+}
+
+# --- Detect Available GPUs ---
+echo "[INFO] Detecting available GPUs..."
+GPU_IDS=($(nvidia-smi --query-gpu=index --format=csv,noheader))
+NUM_GPUS=${#GPU_IDS[@]}
+
+if [ "$NUM_GPUS" -eq 0 ]; then
+    echo "[ERROR] No GPUs detected by nvidia-smi. Exiting."
+    exit 1
+fi
+echo "[INFO] Detected ${NUM_GPUS} GPUs with IDs: ${GPU_IDS[@]}"
+echo "[INFO] Using Binary LR Search with range [${LR_SEARCH_MIN}, ${LR_SEARCH_MAX}], depth=${LR_SEARCH_DEPTH}"
+
+run_counter=0
+
+# --- Loop over the hyperparameters ---
+for TASK in "${TASKS[@]}"; do
+    for ARCH in "${ARCHITECTURES[@]}"; do
+        for SOLVER in "${SOLVERS[@]}"; do
+            for MODEL_SCALE in "${MODEL_SCALES[@]}"; do
+                for INPUT_SAMPLE_LENGTH in "${INPUT_SAMPLE_LENGTHS[@]}"; do
+                    for MICRO_BS in "${MICRO_BATCH_SIZES[@]}"; do
+                        for MACRO_BS in "${MACRO_BATCH_SIZES[@]}"; do
+                            for PROBE_PROCONDITIONING in "${PROBE_PROCONDITIONINGS[@]}"; do
+                            for BETA1 in "${BETA1s[@]}"; do
+                            for BETA2 in "${BETA2s[@]}"; do
+                            for SANGER_RANK in "${SANGER_RANKS[@]}"; do
+                            for beta_eigen_sanger in  "${beta_eigen_sangers[@]}"; do
+                            for saturating_alpha in "${saturating_alphas[@]}"; do
+                            for alpha_eye_scalar in "${alpha_eye_scalars[@]}"; do
+                                for MAX_NUM in "${MAX_NUMS[@]}"; do
+                                    for WEIGHT_DECAY in "${WEIGHT_DECAYS[@]}"; do
+                                        for GRAD_CLIP in "${GRAD_CLIPS[@]}"; do
+                                            for OVERFIT in "${OVERFITS[@]}"; do
+
+                                              # --- Compute model scale–dependent parameters ---
+                                              this_hidden_size=$(( hidden_size * MODEL_SCALE ))
+                                              this_memory_size=$(( memory_size * MODEL_SCALE ))
+                                              this_head_size=$(( head_size * MODEL_SCALE ))
+                                              this_num_head=$(( num_heads * 1 ))
+                                              this_input_size=$(( input_dim * MODEL_SCALE ))
+
+                                              # --- Loop over perturbation counts ---
+                                              for numPert in "${NUM_PERTURBATIONS[@]}"; do
+
+
+                                                EXTRA_FLAGS=""
+                                                if [ "$PROBE_PROCONDITIONING" = true ]; then
+                                                  EXTRA_FLAGS+=" --use_probe_preconditioning"
+                                                fi
+
+                                                if [ "$ADAM" = true ]; then
+                                                  EXTRA_FLAGS+=" --use_adam"
+                                                fi
+
+                                                if [ "$OVERFIT" = true ]; then
+                                                  EXTRA_FLAGS+=" --overfit_to_one_batch_flag"
+                                                fi
+
+                                                if [ "$WANDB" = true ]; then
+                                                  EXTRA_FLAGS+=" --wandb"
+                                                  EXTRA_FLAGS+=" --wandb_proj ${WANDB_PROJ}"
+                                                  EXTRA_FLAGS+=" --wandb_run_name ${RUN_NAME_BASE}"
+                                                fi
+
+                                                # Binary LR Search flags
+                                                EXTRA_FLAGS+=" --binary_lr_search"
+                                                EXTRA_FLAGS+=" --lr_search_min ${LR_SEARCH_MIN}"
+                                                EXTRA_FLAGS+=" --lr_search_max ${LR_SEARCH_MAX}"
+                                                EXTRA_FLAGS+=" --lr_search_depth ${LR_SEARCH_DEPTH}"
+                                                EXTRA_FLAGS+=" --plateau_patience ${PLATEAU_PATIENCE}"
+                                                EXTRA_FLAGS+=" --plateau_threshold ${PLATEAU_THRESHOLD}"
+
+
+                                                RUN_NAME_BASE="${RUN_PREFIX}_${ARCH}_pert_${numPert}_scale${MODEL_SCALE}_SOLV_${SOLVER}_binlr_overfit_${OVERFIT}_cx${INPUT_SAMPLE_LENGTH}_maxnum${MAX_NUM}_hs${this_hidden_size}_mem${this_memory_size}_head${this_head_size}"
+
+                                                # --- Assign GPU for this run ---
+                                                gpu_index=$(( run_counter % NUM_GPUS ))
+                                                assigned_gpu_id=${GPU_IDS[$gpu_index]}
+                                                device_string="cuda:${assigned_gpu_id}"
+
+                                                RUN_NAME=$(truncate_name "${RUN_NAME_BASE}")
+                                                echo "[INFO] Launching screen session: $RUN_NAME_BASE"
+
+                                                screen -dmS "$RUN_NAME" bash -c "
+                                                echo '[INFO] Starting run: $RUN_NAME';
+                                                export WANDB_RUN_NAME=$RUN_NAME;
+                                                python rge_series_experiments.py \
+                                                      --model_type ${ARCH} \
+                                                      --device ${device_string} \
+                                                      --task ${TASK} \
+                                                      --seq_length ${INPUT_SAMPLE_LENGTH} \
+                                                      --hidden_size ${this_hidden_size} \
+                                                      --memory_size ${this_memory_size} \
+                                                      --head_size ${this_head_size} \
+                                                      --num_heads ${this_num_head} \
+                                                      --input_size ${this_input_size} \
+                                                      --micro_batch_size ${MICRO_BS} \
+                                                      --macro_batch_size ${MACRO_BS} \
+                                                      --max_iterations ${MAX_ITERS} \
+                                                      --log_interval ${LOG_INTERVAL} \
+                                                      --learning_rate ${LEARNING_RATE} \
+                                                      --epsilon ${EPSILON} \
+                                                      --sanger_rank ${SANGER_RANK} \
+                                                      --weight_decay ${WEIGHT_DECAY} \
+                                                      --max_num ${MAX_NUM} \
+                                                      --grad_clip ${GRAD_CLIP} \
+                                                      --num_perturbations ${numPert} \
+                                                      --tokenizer char_level \
+                                                      --distribution rad \
+                                                      --beta1 ${BETA1} \
+                                                      --beta2 ${BETA2} \
+                                                      --solver ${SOLVER} \
+                                                      --sanger_qr_every 100 \
+                                                      --saturating_alpha ${saturating_alpha} \
+                                                      --warmup_iters 1 \
+                                                      --seed 42 \
+                                                      --alpha_eye_scalar ${alpha_eye_scalar} \
+                                                      --beta_eigen_sanger ${beta_eigen_sanger} \
+                                                      --output_dir ./results_binlr_run \
+                                                      ${EXTRA_FLAGS} \
+                                                      ;
+                                                echo '[INFO] Finished run: $RUN_NAME_BASE';
+                                                exec bash
+                                                "
+                                                run_counter=$(( run_counter + 1 ))
+
+                                                done
+                                            done
+                                        done
+                                    done
+                                done
+                            done
+                            done
+                            done
+                            done
+                            done
+                            done
+                            done
+                        done
+                    done
+                done
+            done
+        done
+    done
+done
+
+echo "[INFO] Done launching all screen sessions."
+echo "[INFO] Total runs launched: ${run_counter}"
+echo "[INFO] Each run will automatically find optimal LR via binary search."

@@ -296,5 +296,74 @@ You will observe far **faster** distributed training with more modern GPUs like 
 | **96·CD-RGE (dist × 8)**   | 0.05 | 0.06 | 0.07 | 0.40 | 4.4 |
 | **512·CD-RGE (dist × 8)**  | 0.25 | 0.29 | 0.29 | 1.87 | 19.3 |
 
-> **Units:** seconds per training step (forward + backward + parameter update)  
+> **Units:** seconds per training step (forward + backward + parameter update)
 > Dashes (—) indicate experiments not run due to memory limits on a single A40.
+
+---
+
+## 6. Binary Learning Rate Search Mode
+
+For hyperparameter tuning, manually sweeping over learning rates can be time-consuming. The **Binary LR Search** mode automatically finds an optimal learning rate at the start of training using binary search in log-space, and can re-search if a plateau is detected.
+
+### 6.1. How It Works
+
+1. **Initial Search**: Before training begins, the algorithm tests 3 learning rates (min, geometric-mid, max) in log-space
+2. **Binary Narrowing**: For each additional depth level, it narrows to the better half and tests the new midpoint
+3. **Probing**: Each LR is tested by saving weights, taking steps, evaluating loss, then restoring weights
+4. **Plateau Detection**: During training, an EMA-based detector monitors loss improvement. If loss plateaus, a new LR search is triggered
+
+### 6.2. Command Line Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--binary_lr_search` | `false` | Enable binary LR search mode |
+| `--lr_search_min` | `1e-5` | Minimum LR to search |
+| `--lr_search_max` | `0.1` | Maximum LR to search |
+| `--lr_search_depth` | `3` | Search depth (more = finer granularity) |
+| `--lr_search_probe_steps` | `1` | Steps to take when probing each LR |
+| `--plateau_patience` | `10` | Iterations without improvement before re-search |
+| `--plateau_threshold` | `0.01` | Minimum relative improvement to reset patience |
+| `--plateau_ema_alpha` | `0.1` | EMA smoothing factor for loss tracking |
+| `--cache_weights_to_cpu` | `false` | Cache weights to CPU during probing (saves VRAM) |
+
+### 6.3. Example Usage
+
+```bash
+# Run with binary LR search on a DNC model
+python rge_series_experiments.py \
+    --model_type DNC \
+    --device cuda:0 \
+    --task copy \
+    --seq_length 100 \
+    --hidden_size 2048 \
+    --memory_size 2048 \
+    --head_size 2048 \
+    --solver 1.5-SPSA \
+    --num_perturbations 96 \
+    --binary_lr_search \
+    --lr_search_min 0.0001 \
+    --lr_search_max 0.1 \
+    --lr_search_depth 4 \
+    --plateau_patience 15 \
+    --plateau_threshold 0.005 \
+    --overfit_to_one_batch_flag \
+    --max_iterations 100
+```
+
+### 6.4. Sweep Script
+
+A pre-configured sweep script is provided:
+```bash
+./scripts/series_1.5SPSA_hpp_sweeps_binary_search.sh
+```
+
+This script automatically launches experiments with binary LR search enabled, eliminating the need for manual LR sweeps.
+
+### 6.5. Example Results
+
+On a scale-16 DNC model (~52M parameters) with 96 perturbations:
+- Binary search found optimal LR = 3.16e-03
+- Converged (loss < 0.1) in **12-19 iterations**
+- Total training time: ~25-35 minutes
+
+This compares favorably to manual LR sweeps which require running many experiments to find the right learning rate.

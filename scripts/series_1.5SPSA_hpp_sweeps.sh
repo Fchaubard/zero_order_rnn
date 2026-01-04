@@ -20,21 +20,22 @@ TASKS=("copy") # can use copy, reverse, sort, add, penn_treebank, etc..
 # ARCHITECTURES=("Transformer" "Mamba" "SSM") # can use DNC and LSTM only right now
 ARCHITECTURES=("DNC")
 
-MODEL_SCALES=(1 2 4 8 16) # Can choose anything here from 1 to 64: MODEL_SCALES=(1 2 4 8 16 32 64) 
+MODEL_SCALES=(8 16 32 64) # Can choose anything here from 1 to 64: MODEL_SCALES=(1 2 4 8 16 32 64) 
 # MODEL_SCALES=(64)
 hidden_size=128
 memory_size=128
 head_size=128
 num_heads=1
-input_dim=32
+input_dim=128
 variance_reduction=1.
 
 INPUT_SAMPLE_LENGTHS=(100)
 MICRO_BATCH_SIZES=(1)
 MACRO_BATCH_SIZES=(1)
 
-LEARNING_RATES=(0.1 0.01 )  # sweep LRs from 1e-5 to .1 here 
-# EPSILONS=(0.1 0.01 0.001 0.0001 0.00001)  # sweep LRs from 1e-5 to .1 here 
+# LEARNING_RATES=(0.05 0.01 0.005 0.001) 
+# LEARNING_RATES=(0.05 0.01 0.005)  # sweep LRs from 1e-5 to .1 here 
+EPSILONS=(0.01 0.001 0.0001)  # sweep LRs from 1e-5 to .1 here 
 # LEARNING_RATES=(0.1)  # sweep LRs from 1e-5 to .1 here 
 EPSILONS=(0.1)  # sweep LRs from 1e-5 to .1 here 
 
@@ -55,13 +56,13 @@ beta_eigen_sangers=(0)
 
 NUM_PERTURBATIONS=(8)
 # NUM_PERTURBATIONS=(8 96 512)
-saturating_alphas=(0.1)
+saturating_alphas=(0.5 0.1)
 
 OVERFITS=(true)
 
 # Other configurations:
 LOG_INTERVAL=100
-MAX_ITERS=2000
+MAX_ITERS=5000
 
 TIE_EPS_TO_LR=true # true if you want LR to override EPS so they are equal
 ADAM=false # true if you want to use adam and BPTT, otherwise set to false. Not implemented for ZOO.
@@ -121,7 +122,7 @@ for TASK in "${TASKS[@]}"; do
                                                   this_head_size=$(( head_size * MODEL_SCALE ))
                                                   # this_num_head=$(( num_heads * MODEL_SCALE ))
                                                   this_num_head=$(( num_heads * 1 ))
-                                                  this_input_size=$(( input_dim * 1 ))
+                                                  this_input_size=$(( input_dim * MODEL_SCALE ))
                                                   
                                                   # --- Loop over new ablation parameters ---
                                                   for numPert in "${NUM_PERTURBATIONS[@]}"; do
