@@ -49,10 +49,22 @@ for session in sessions[1:]:  # Skip first split
     if match:
         solver = match.group(1)
 
-    # Extract learning rate from session name (lr0.xxx)
+    # Extract learning rate from session name (lr0.xxx) or Namespace
     match = re.search(r'_lr([0-9.]+)', first_line)
     if match:
         lr = match.group(1)
+    else:
+        # Try to get LR from Namespace output (for binary LR search runs)
+        match = re.search(r"learning_rate=([0-9.e+-]+)", session)
+        if match:
+            try:
+                lr_val = float(match.group(1))
+                lr = f"{lr_val:.2e}"
+            except:
+                lr = match.group(1)
+        # Check if this is a binlr run
+        if '_binlr_' in first_line:
+            lr = lr if lr else "binlr"
 
     # Extract saturating_alpha from Namespace or estimate from log
     match = re.search(r"saturating_alpha=([0-9.]+)", session)
@@ -113,12 +125,12 @@ for session in sessions[1:]:  # Skip first split
             else:
                 status = "still_training"
 
-    # Only add if we have key fields
-    if solver and lr and status:
+    # Only add if we have key fields (solver required, lr defaults to binlr if missing)
+    if solver and status:
         results.append({
             'iters': iters if iters is not None else 0,
             'solver': solver,
-            'lr': lr,
+            'lr': lr or 'binlr',
             'sat_alpha': sat_alpha or '-',
             'final_loss': final_loss or '-',
             'train_time': train_time or '-',
