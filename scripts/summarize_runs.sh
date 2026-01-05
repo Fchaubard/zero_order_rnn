@@ -107,6 +107,18 @@ for session in sessions[1:]:  # Skip first split
             if time_match:
                 train_time = time_match.group(1)
 
+    # Check if still in binary LR search phase
+    if re.search(r"Running initial binary LR search", session) and not re.search(r"Binary search complete:", session):
+        status = "lr_search"
+        iters = 0
+        # Get the last depth being searched
+        depth_matches = re.findall(r"Binary search depth (\d+):", session)
+        if depth_matches:
+            final_loss = f"depth_{depth_matches[-1]}"
+        else:
+            final_loss = "starting"
+        train_time = "-"
+
     # Check if still training or completed max iterations
     # Handle both 2000 and 5000 max_iters
     iter_match = re.search(r"Iteration \d+/(\d+)", session)
