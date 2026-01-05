@@ -111,6 +111,7 @@ for session in sessions[1:]:  # Skip first split
     if re.search(r"Running initial binary LR search", session) and not re.search(r"Binary search complete:", session):
         status = "lr_search"
         iters = 0
+        lr = "binlr"  # Override - LR not determined yet
         # Get the last depth being searched
         depth_matches = re.findall(r"Binary search depth (\d+):", session)
         if depth_matches:
