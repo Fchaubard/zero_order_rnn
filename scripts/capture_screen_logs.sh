@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Function to capture the last 50 lines of each screen session
+# Function to capture the last 500 lines of each screen session (with scrollback)
 capture_screen_logs() {
     # List all active screen sessions
     screen_sessions=$(screen -ls | awk '/\t/ {print $1}')
@@ -21,12 +21,12 @@ capture_screen_logs() {
         # Create a temporary file to store the output
         tmpfile=$(mktemp)
 
-        # Attach to the screen session, dump last 50 lines, and detach
-        screen -S "$session" -X hardcopy "$tmpfile"
+        # Attach to the screen session, dump scrollback history (-h flag), and detach
+        screen -S "$session" -X hardcopy -h "$tmpfile"
 
         if [ -f "$tmpfile" ]; then
-            # Extract the last 50 lines of the session
-            tail -n 100 "$tmpfile"
+            # Extract the last 500 lines of the session (enough to capture validation logs)
+            tail -n 500 "$tmpfile"
 
             # Clean up the temporary file
             rm -f "$tmpfile"
