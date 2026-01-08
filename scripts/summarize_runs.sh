@@ -30,6 +30,7 @@ for session in sessions[1:]:  # Skip first split
     lr = None
     sat_alpha = None
     final_loss = None
+    val_loss = None
     train_time = None
     status = None
     iters = None
@@ -138,6 +139,12 @@ for session in sessions[1:]:  # Skip first split
             else:
                 status = "still_training"
 
+    # Extract validation loss (last validation result)
+    # Format: "Validation at iter X: Loss: Y.YYYY"
+    val_matches = re.findall(r"Validation at iter \d+: Loss: ([0-9.]+)", session)
+    if val_matches:
+        val_loss = val_matches[-1]  # Get the last validation loss
+
     # Only add if we have key fields (solver required, lr defaults to binlr if missing)
     if solver and status:
         results.append({
@@ -146,36 +153,46 @@ for session in sessions[1:]:  # Skip first split
             'lr': lr or 'binlr',
             'sat_alpha': sat_alpha or '-',
             'final_loss': final_loss or '-',
+            'val_loss': val_loss or '-',
             'train_time': train_time or '-',
             'status': status,
             'screen_name': screen_name or '-'
         })
 
-# Sort by iterations
-results.sort(key=lambda x: x['iters'])
+# Sort by val_loss (lowest first), with '-' values at the end
+def sort_key(x):
+    vl = x['val_loss']
+    if vl == '-':
+        return (1, 0)  # Put '-' at the end
+    try:
+        return (0, float(vl))
+    except:
+        return (1, 0)
+
+results.sort(key=sort_key)
 
 # Write to output file
 with open(outfile, 'w') as f:
     for r in results:
-        f.write(f"{r['iters']:06d}|{r['solver']}|{r['lr']}|{r['sat_alpha']}|{r['final_loss']}|{r['train_time']}|{r['status']}|{r['screen_name']}\n")
+        f.write(f"{r['iters']:06d}|{r['solver']}|{r['lr']}|{r['sat_alpha']}|{r['final_loss']}|{r['val_loss']}|{r['train_time']}|{r['status']}|{r['screen_name']}\n")
 PYEOF
 
 echo ""
-echo "========================================================================================================================================"
-echo "                                                    TRAINING RUNS SUMMARY"
-echo "========================================================================================================================================"
-printf "%-8s | %-10s | %-8s | %-12s | %-10s | %-15s | %s\n" "Iters" "Solver" "LR" "Final Loss" "Time(s)" "Status" "Screen Name"
-echo "----------------------------------------------------------------------------------------------------------------------------------------"
+echo "================================================================================================================================================"
+echo "                                                    TRAINING RUNS SUMMARY (sorted by Val Loss)"
+echo "================================================================================================================================================"
+printf "%-8s | %-10s | %-8s | %-12s | %-10s | %-10s | %-15s | %s\n" "Iters" "Solver" "LR" "Train Loss" "Val Loss" "Time(s)" "Status" "Screen Name"
+echo "------------------------------------------------------------------------------------------------------------------------------------------------"
 
 # Display sorted results
-while IFS='|' read -r iters solver lr sat_alpha final_loss train_time status screen_name; do
+while IFS='|' read -r iters solver lr sat_alpha final_loss val_loss train_time status screen_name; do
     # Remove leading zeros from iters
     iters_clean=$(echo "$iters" | sed 's/^0*//' | sed 's/^$/0/')
-    printf "%-8s | %-10s | %-8s | %-12s | %-10s | %-15s | %s\n" \
-        "$iters_clean" "$solver" "$lr" "$final_loss" "$train_time" "$status" "$screen_name"
+    printf "%-8s | %-10s | %-8s | %-12s | %-10s | %-10s | %-15s | %s\n" \
+        "$iters_clean" "$solver" "$lr" "$final_loss" "$val_loss" "$train_time" "$status" "$screen_name"
 done < "$TMPFILE"
 
-echo "----------------------------------------------------------------------------------------------------------------------------------------"
+echo "------------------------------------------------------------------------------------------------------------------------------------------------"
 
 # Summary counts
 total=$(wc -l < "$TMPFILE" 2>/dev/null | tr -d ' \n')
